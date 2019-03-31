@@ -8,10 +8,21 @@
 #     exit 1;
 # fi
 
+# git submodule update
+
 cd Maker
 echo "Building Maker..."
 eosio-cpp daiqcontract.cpp -o daiqcontract.wasm -I daiqcontract.clauses.md -I daiqcontract.contracts.md
 # eosio-cpp -abigen daiqcontract.cpp -o daiqcontract.wasm -I daiqcontract.clauses.md -I daiqcontract.contracts.md
+
+# cd ../Everipedia/everipediaiq
+# echo "Building everipediaiq..."
+# eosio-cpp -abigen everipediaiq.cpp -o everipediaiq.wasm -I everipediaiq.clauses.md -I everipediaiq.contracts.md
+
+# cd ../../Bonds
+# echo "Building Bonds..."
+# eosio-cpp -abigen bond.cpp -o bond.wasm -I bond.clauses.md -I bond.contracts.md
+# eosio-cpp -abigen everipediaiq.cpp -o everipediaiq.wasm -I everipediaiq.clauses.md -I everipediaiq.contracts.md
 
 # cd ../everipediaiq
 # echo "Building everipediaiq..."
