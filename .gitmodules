@@ -1,3 +1,7 @@
 [submodule "eosio_utxo"]
 	path = eosio_utxo
 	url = https://github.com/chrisatanasian/eosio_utxo.git
+
+[submodule "everipediaiq"]
+	path = everipediaiq
+	url = https://github.com/EveripediaNetwork/Everipedia.git
