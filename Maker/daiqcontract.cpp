@@ -125,6 +125,7 @@ ACTION daiqcontract::bail( name owner, symbol_code symbl, asset quantity )
    {  f.total += quantity; });
 }
 
+// Issue fresh stablecoin from this CDP
 ACTION daiqcontract::draw( name owner, symbol_code symbl, asset quantity )
 {  
    // Make sure the owner is authenticated
@@ -182,6 +183,7 @@ ACTION daiqcontract::draw( name owner, symbol_code symbl, asset quantity )
    {  f.total += quantity; });
 }
 
+// Reduce the stablecoin balance by relinquishing some to the CDP
 ACTION daiqcontract::wipe( name owner, symbol_code symbl, asset quantity ) 
 {  
    // Make sure the owner is authenticated
@@ -243,6 +245,7 @@ ACTION daiqcontract::wipe( name owner, symbol_code symbl, asset quantity )
    {  f.total -= quantity; });
 }
 
+// Add more collateral to the CDP
 ACTION daiqcontract::lock( name owner, symbol_code symbl, asset quantity ) 
 {  
    // Make sure the owner is authenticated
@@ -284,6 +287,7 @@ ACTION daiqcontract::lock( name owner, symbol_code symbl, asset quantity )
    {  f.total -= quantity; });
 }
 
+// Close out the CDP by paying off the required DAI plus the stability fee
 ACTION daiqcontract::shut( name owner, symbol_code symbl ) 
 {  
    // Make sure the owner is authenticated
@@ -320,6 +324,7 @@ ACTION daiqcontract::shut( name owner, symbol_code symbl )
    cdpstable.erase( it );
 }
 
+// Global settlement
 ACTION daiqcontract::settle( name feeder, symbol_code symbl ) 
 {  
    // Make sure the feeder is authenticated
@@ -338,16 +343,16 @@ ACTION daiqcontract::settle( name feeder, symbol_code symbl )
    feeds feedstable( _self, _self.value );
    const auto& fc = feedstable.get( st.total_collateral.quantity.symbol.code().raw(), "No price data" );
    
-   uint64_t liq = ( fc.price.amount * 100 * st.total_collateral.quantity.amount ) /
-                  ( st.total_stablecoin.amount * 10000 );
-                   
-   eosio_assert( st.liquid8_ratio >= liq, 
-                 "no liquidation hazard for settlement"
-               );                                  
+   // Make sure there is no liquidation hazard
+   uint64_t liq = ( fc.price.amount * 100 * st.total_collateral.quantity.amount ) / ( st.total_stablecoin.amount * 10000 );    
+   eosio_assert( st.liquid8_ratio >= liq, "No liquidation hazard for settlement" );  
+   
+   // Set the stablecoin status as not live                                
    stable.modify( st, same_payer, [&]( auto& t ) 
    {  t.live = false; });
 }
 
+// Vote for or against a CDP proposal
 ACTION daiqcontract::vote( name voter, symbol_code symbl, bool against, asset quantity ) 
 {  
    // Make sure the voter is authenticated
@@ -358,10 +363,14 @@ ACTION daiqcontract::vote( name voter, symbol_code symbl, bool against, asset qu
    eosio_assert( quantity.is_valid() && quantity.amount > 0, "Invalid quantity" );
    eosio_assert( quantity.symbol == IQ_SYMBOL, "Must vote with governance token" );
 
+   // Get the proposal for the symbl-denominated CDP
    props propstable( _self, _self.value );
-   const auto& pt = propstable.get( symbl.raw(), "CDP type not proposed" 
-                                  );
+   const auto& pt = propstable.get( symbl.raw(), "CDP type not proposed" );
+
+   // Lower the voter's IQ balance
    sub_balance( voter, quantity );
+
+   // This is used to keep track of which voters voted for what CDP symbol proposals and how much IQ they used to do so
    accounts acnts( _self, symbl.raw() );  
    auto at = acnts.find( voter.value );
    if ( at == acnts.end() )
@@ -374,6 +383,8 @@ ACTION daiqcontract::vote( name voter, symbol_code symbl, bool against, asset qu
    else
       acnts.modify( at, same_payer, [&]( auto& a ) 
       {  a.balance += asset( quantity.amount, symbol( symbl, 3 ) ); });
+
+   // Keep track of the vote quantity by updating the propstable.
    if (against)
       propstable.modify( pt, same_payer, [&]( auto& p ) 
       {  p.nay += quantity; });
@@ -382,6 +393,7 @@ ACTION daiqcontract::vote( name voter, symbol_code symbl, bool against, asset qu
       {  p.yay += quantity; });
 }
 
+// Sell off some collateral if the market moves against it. Similar to a margin call.
 ACTION daiqcontract::liquify( name bidder, name owner, symbol_code symbl, asset bidamt ) 
 {  
    // Make sure the bidder is authenticated
@@ -401,8 +413,9 @@ ACTION daiqcontract::liquify( name bidder, name owner, symbol_code symbl, asset 
    // Make sure the price feed exists
    feeds feedstable( _self, _self.value );
 
-   const auto& it = cdpstable.get( owner.value, "This CDP does not exist" 
-                                 );
+   // Verify that the CDP exists
+   const auto& it = cdpstable.get( owner.value, "This CDP does not exist" );
+   
    if ( it.live ) {
       eosio_assert ( it.stablecoin.amount > 0, "Can't liquify this CDP" );
       const auto& fc = feedstable.get( it.collateral.symbol.code().raw(), 

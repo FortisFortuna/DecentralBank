@@ -7,7 +7,7 @@ Description of the deposit function
 <h1 class="contract">draw</h1>
 Issue fresh stablecoin from this cdp.
 <h1 class="contract">liquify</h1>
-If the collateral value in a CDP drops below 150% of the outstanding Dai, the contract automatically sells enough of your collateral to buy back as many Dai as you issued. The issued Dai is thus taken out of circulation. 
+If the collateral value in a CDP drops below 150% of the outstanding Dai, the contract automatically sells enough of your collateral to buy back as many Dai as you issued. The issued Dai is thus taken out of circulation. Similar to a margin call.
 <h1 class="contract">lock</h1>
 Unless CDP is in liquidation, its owner can use lock to lock more collateral. 
 <h1 class="contract">open</h1>
