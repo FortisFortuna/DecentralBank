@@ -40,6 +40,7 @@ using namespace eosio;
 //    cdpstable.erase( git );
 // }
 
+// Start a new CDP
 ACTION daiqcontract::open( name owner, symbol_code symbl, name ram_payer )
 {  
    // Make sure the RAM payer is authenticated
@@ -73,28 +74,26 @@ ACTION daiqcontract::open( name owner, symbol_code symbl, name ram_payer )
    }); 
 }
 
+// Reclaim some collateral from an overcollateralized CDP
 ACTION daiqcontract::bail( name owner, symbol_code symbl, asset quantity )
 {  
    // Make sure the owner is authenticated
    require_auth(owner);
 
-   // Make sure the symbol and its value is valid
+   // Make sure the symbol and its value are valid
    eosio_assert( quantity.is_valid(), "Invalid quantity" );
    eosio_assert( symbl.is_valid(), "Invalid symbol name" );
    eosio_assert( quantity.amount > 0, "Must use a positive quantity" );
-   stats stable( _self, _self.value );
+   
 
-   // Get the stats for the stablecoin
+   // Get the stats for the stablecoin and validate
+   stats stable( _self, _self.value );
    const auto& st = stable.get( symbl.raw(), "CDP type does not exist" );
    eosio_assert( quantity.symbol == st.total_collateral.quantity.symbol, "(CDP type, collateral symbol) mismatch" );
 
-   // Fetch the CDP
+   // Fetch the CDP, validate the owner, and make sure it is not being liquidated
    cdps cdpstable( _self, symbl.raw() );
-
-   // Make sure the CDP owner is correct
    const auto& it = cdpstable.get( owner.value, "(CDP type, owner) mismatch" );
-
-   // Verify the CDP is not currently being liquidated
    eosio_assert( it.live, "CDP is in liquidation" );
 
    // Verify the person is not trying to free too much collateral
@@ -107,7 +106,7 @@ ACTION daiqcontract::bail( name owner, symbol_code symbl, asset quantity )
 
    // Affirm that the amount being bailed does not cause the CDP to fall below the liquidation ratio
    uint64_t amt = st.liquid8_ratio;
-   if ( it.stablecoin.amount ) //just safety against divide by 0
+   if ( it.stablecoin.amount ) // just safety against divide by 0
       amt = ( fc.price.amount * 100 / it.stablecoin.amount ) *
             ( it.collateral.amount - quantity.amount ) / 10000;
    eosio_assert( amt >= st.liquid8_ratio, "Can't go below liquidation ratio" );
@@ -131,7 +130,7 @@ ACTION daiqcontract::draw( name owner, symbol_code symbl, asset quantity )
    // Make sure the owner is authenticated
    require_auth( owner );
 
-   // Make sure the symbol and its value is valid
+   // Make sure the symbol and its value are valid
    eosio_assert( quantity.is_valid(), "Invalid quantity" );
    eosio_assert( symbl.is_valid(), "Invalid symbol name" );
    eosio_assert( quantity.amount > 0, "Must use a positive quantity" );
@@ -144,13 +143,9 @@ ACTION daiqcontract::draw( name owner, symbol_code symbl, asset quantity )
    eosio_assert( quantity.symbol == st.total_stablecoin.symbol, "(CDP type, stablecoin symbol) mismatch" );
    eosio_assert( st.live, "CDP type not yet live, or in global settlement" );
 
-   // Fetch the CDP
+   // Fetch the CDP, validate the owner, and make sure it is not being liquidated
    cdps cdpstable( _self, symbl.raw() );
-
-   // Make sure the CDP owner is correct
    const auto& it = cdpstable.get( owner.value, "(CDP type, owner) mismatch");
-
-   // Make sure the CDP is not being liquidated
    eosio_assert( it.live, "CDP is in liquidation" );
    
    // Increase the stablecoin amount in the CDP
@@ -163,110 +158,121 @@ ACTION daiqcontract::draw( name owner, symbol_code symbl, asset quantity )
    eosio_assert( st.debt_ceiling >= amt, "Can't reach the debt ceiling" );
    eosio_assert( st.global_ceil >= gmt, "Can't reach the global debt ceiling" );
 
-
+   // Make sure the price feed exists and has fresh data
    feeds feedstable( _self, _self.value );
-   const auto& fc = feedstable.get( it.collateral.symbol.code().raw(), 
-                                    "Feed does not exist" 
-                                  );
-   eosio_assert( fc.stamp >= now() - FEED_FRESH,
-                 "Collateral price feed data too stale"
-               ); 
-   uint64_t liq = ( fc.price.amount * 100 / amt ) *
-                  ( it.collateral.amount ) / 10000;
-   eosio_assert( liq >= st.liquid8_ratio, 
-                 "Can't go below liquidation ratio" 
-               );
-   const auto& fs = feedstable.get( quantity.symbol.code().raw(), 
-                                    "Feed does not exist" 
-                                  );
-   add_balance( owner, quantity, _self ); //increase owner's stablecoin balance
+   const auto& fc = feedstable.get( it.collateral.symbol.code().raw(), "Feed does not exist" );
+   eosio_assert( fc.stamp >= now() - FEED_FRESH, "Collateral price feed data too stale" ); 
+   
+   // Assure that the draw does not cause the CDP to go below the liquidation ratio
+   uint64_t liq = ( fc.price.amount * 100 / amt ) * ( it.collateral.amount ) / 10000;
+   eosio_assert( liq >= st.liquid8_ratio, "Can't go below liquidation ratio" );
+   const auto& fs = feedstable.get( quantity.symbol.code().raw(), "Feed does not exist" );
+
+   // Increase owner's stablecoin balance
+   add_balance( owner, quantity, _self ); 
    cdpstable.modify( it, same_payer, [&]( auto& p ) 
    {  p.stablecoin += quantity; });
-   //update amount of stablecoin in circulation for this cdp type
+
+   // Update amount of stablecoin in circulation for this CDP type
    stable.modify( st, same_payer,  [&]( auto& t ) 
    {  t.total_stablecoin += quantity; });
-   //update amount of this stablecoin in circulation globally 
+
+   // Update amount of this stablecoin in circulation globally 
    feedstable.modify( fs, same_payer, [&]( auto& f ) 
    {  f.total += quantity; });
 }
 
 ACTION daiqcontract::wipe( name owner, symbol_code symbl, asset quantity ) 
-{  require_auth( owner );
+{  
+   // Make sure the owner is authenticated
+   require_auth( owner );
+
+   // Make sure the symbol and its value are valid
    eosio_assert( symbl.is_valid(), "Invalid symbol name" ); 
    eosio_assert( quantity.is_valid(), "Invalid quantity" );
-   eosio_assert( quantity.amount > 0, 
-                 "Must use a positive quantity" 
-               );
+   eosio_assert( quantity.amount > 0, "Must use a positive quantity" );
+
+   // Get the stats for the stablecoin
    stats stable( _self, _self.value );
+
+   // Make sure the price feed exists and has fresh data
    feeds feedstable(_self, _self.value );
-   const auto& st = stable.get( symbl.raw(),
-                                "cdp type does not exist" 
-                             );
-   eosio_assert( quantity.symbol == st.total_stablecoin.symbol, 
-                 "(cdp type, symbol) mismatch"  
-               );
+   const auto& st = stable.get( symbl.raw(), "CDP type does not exist" );
+   eosio_assert( quantity.symbol == st.total_stablecoin.symbol, "(CDP type, symbol) mismatch" );
+
+   // Fetch the CDP, validate the owner, and make sure it is not being liquidated
    cdps cdpstable( _self, symbl.raw() );
-   const auto& it = cdpstable.get( owner.value, 
-                                   "(CDP type, owner) mismatch" 
-                                 ); 
-   eosio_assert( it.live, "cdp in liquidation" );
-   eosio_assert( it.stablecoin > quantity, 
-                 "Can't wipe this much, try shut?" 
-               ); 
-   const auto& fv = feedstable.get( IQ_SYMBOL.code().raw(), 
-                                    "no price data" 
-                                  );
+   const auto& it = cdpstable.get( owner.value, "(CDP type, owner) mismatch" ); 
+   eosio_assert( it.live, "CDP in liquidation" );
+
+   // Make sure that you are not trying to wipe more stablecoin than is available in for the CDP
+   eosio_assert( it.stablecoin > quantity, "Can't wipe this much, try shut?" ); 
+
+   // Get the price feed
+   const auto& fv = feedstable.get( IQ_SYMBOL.code().raw(), "No price data" );
+
+   // Calculate the stability fee and create the asset object
    uint64_t apr = 1000000 * st.stability_fee * 
                   ( now() - it.created ) / SECYR *
                   ( quantity.amount * 100 / fv.price.amount ) / 100000;
    asset fee = asset( apr, IQ_SYMBOL );
-   sub_balance( owner, fee ); //pay stability fee
+
+   // Have the CDP owner pay the stability fee
+   sub_balance( owner, fee );
+
    //add_balance( _self, fee, IQ_NAME ); //increase contract's total fee balance
-   sub_balance( owner, quantity ); //decrease owner's stablecoin balance
-   //update amount of stablecoin in circulation for this cdp type
+
+   // Have the owner relinquish the stablecoins
+   sub_balance( owner, quantity );
+
+   // Update the global fee and outstanding stablecoin amounts 
    stable.modify( st, same_payer,  [&]( auto& t ) { 
       t.fee_balance += fee; //just to keep track
       t.total_stablecoin -= quantity;
    });
+
+   // Lower the amount of stablecoins in the CDP
    cdpstable.modify( it, same_payer, [&]( auto& p ) 
    {  p.stablecoin -= quantity; });
-   const auto& fs = feedstable.get( quantity.symbol.code().raw(), 
-                                    "no price data" 
-                                  );
-   //update amount of this stablecoin in circulation globally 
+
+   // Get the price feed
+   const auto& fs = feedstable.get( quantity.symbol.code().raw(), "No price data" );
+
+   // Update amount of this stablecoin in circulation globally 
    feedstable.modify( fs, same_payer, [&]( auto& f ) 
    {  f.total -= quantity; });
 }
 
 ACTION daiqcontract::lock( name owner, symbol_code symbl, asset quantity ) 
-{  require_auth( owner );
+{  
+   // Make sure the owner is authenticated
+   require_auth( owner );
+
+   // Make sure the symbol and its value are valid
    eosio_assert( quantity.is_valid(), "Invalid quantity" );
    eosio_assert( symbl.is_valid(), "Invalid symbol name" );
-   eosio_assert( quantity.amount > 0, 
-                 "Must use a positive quantity" 
-               );
+   eosio_assert( quantity.amount > 0, "Must use a positive quantity" );
+
+   // Get the stats for the stablecoin and validate
    stats stable( _self, _self.value );
-   const auto& st = stable.get( symbl.raw(), 
-                                    "CDP type does not exist" 
-                                  );
-   eosio_assert( st.live, 
-                 "CDP type not yet live, or in global settlement"
-               );
-   eosio_assert( st.total_collateral.quantity.symbol == quantity.symbol, 
-                 "(CDP type, collateral symbol) mismatch" 
-               );
+   const auto& st = stable.get( symbl.raw(), "CDP type does not exist" );
+   eosio_assert( st.live, "CDP type not yet live, or in global settlement" );
+   eosio_assert( st.total_collateral.quantity.symbol == quantity.symbol, "(CDP type, collateral symbol) mismatch" );
+
+   // Fetch the CDP, validate the owner, and make sure it is not being liquidated
    cdps cdpstable( _self, symbl.raw() );
-   const auto& it = cdpstable.get( owner.value, 
-                                   "this cdp doesn't exist" 
-                                 );
-   eosio_assert( it.live, "cdp in liquidation" );
+   const auto& it = cdpstable.get( owner.value, "This CDP does not exist" );
+   eosio_assert( it.live, "CDP in liquidation" );
+
+   // Subtract the collateral from the owner and make sure the token isn't an identically-named copy from a fake contract
    name contract = sub_balance( owner, quantity );
-   eosio_assert( st.total_collateral.contract == contract,
-                 "no using tokens from fake contracts" 
-               );
-   //update amount of collateral in circulation for this cdp type
+   eosio_assert( st.total_collateral.contract == contract, "No using tokens from fake contracts" );
+
+   // Update amount of collateral in circulation for this CDP type
    stable.modify( st, same_payer,  [&]( auto& t ) 
    {  t.total_collateral.quantity += quantity; });
+
+   // Update amount of collateral in circulation for this CDP type
    cdpstable.modify( it, same_payer, [&]( auto& p ) 
    {  p.collateral += quantity; });
    feeds feedstable(_self, _self.value );
@@ -279,18 +285,21 @@ ACTION daiqcontract::lock( name owner, symbol_code symbl, asset quantity )
 }
 
 ACTION daiqcontract::shut( name owner, symbol_code symbl ) 
-{  require_auth( owner );
+{  
+   // Make sure the owner is authenticated
+   require_auth( owner );
+
+   // Make sure the symbol and its value are valid
    eosio_assert( symbl.is_valid(), "Invalid symbol name" );
-  
+
+   // Get the stats for the stablecoin and validate
    stats stable( _self, _self.value );
-   const auto& st = stable.get( symbl.raw(), 
-                                "CDP type does not exist" 
-                              );
+   const auto& st = stable.get( symbl.raw(), "CDP type does not exist" );
+
+   // Fetch the CDP, validate the owner, and make sure it is not being liquidated
    cdps cdpstable( _self, symbl.raw() );
-   const auto& it = cdpstable.get( owner.value, 
-                                   "this cdp doesn't exist" 
-                                 );
-   eosio_assert( it.live, "cdp in liquidation" );
+   const auto& it = cdpstable.get( owner.value, "This CDP does not exist" );
+   eosio_assert( it.live, "CDP in liquidation" );
    
    asset new_total_stabl = st.total_stablecoin;
    if (it.stablecoin.amount > 0) {
@@ -312,23 +321,23 @@ ACTION daiqcontract::shut( name owner, symbol_code symbl )
 }
 
 ACTION daiqcontract::settle( name feeder, symbol_code symbl ) 
-{  require_auth( feeder );
+{  
+   // Make sure the feeder is authenticated
+   require_auth( feeder );
+
+   // Make sure the symbol and its value are valid
    eosio_assert( symbl.is_valid(), "Invalid symbol name" );
    
+   // Get the stats for the stablecoin and validate
    stats stable( _self, _self.value );
-   const auto& st = stable.get( symbl.raw(), 
-                                "CDP type does not exist" 
-                              );
-   eosio_assert( st.total_stablecoin.amount > 0 && st.live, 
-                 "cdp type already settled, or has 0 debt"
-               ); 
-   eosio_assert( st.feeder == feeder, 
-                 "only feeder can trigger global settlement"
-               ); 
+   const auto& st = stable.get( symbl.raw(), "CDP type does not exist" );
+   eosio_assert( st.total_stablecoin.amount > 0 && st.live, "CDP type already settled, or has 0 debt" );
+   eosio_assert( st.feeder == feeder, "Only feeder can trigger global settlement" ); 
+
+   // Make sure the price feed exists and has fresh data
    feeds feedstable( _self, _self.value );
-   const auto& fc = feedstable.get( st.total_collateral.quantity.symbol.code().raw(), 
-                                    "no price data" 
-                                  );
+   const auto& fc = feedstable.get( st.total_collateral.quantity.symbol.code().raw(), "No price data" );
+   
    uint64_t liq = ( fc.price.amount * 100 * st.total_collateral.quantity.amount ) /
                   ( st.total_stablecoin.amount * 10000 );
                    
@@ -339,19 +348,18 @@ ACTION daiqcontract::settle( name feeder, symbol_code symbl )
    {  t.live = false; });
 }
 
-ACTION daiqcontract::vote( name voter, symbol_code symbl, 
-                           bool against, asset quantity ) 
-{  require_auth( voter );
+ACTION daiqcontract::vote( name voter, symbol_code symbl, bool against, asset quantity ) 
+{  
+   // Make sure the voter is authenticated
+   require_auth( voter );
+
+   // Make sure the symbol and its value are valid
    eosio_assert( symbl.is_valid(), "Invalid symbol name" );
-   eosio_assert( quantity.is_valid() && quantity.amount > 0, 
-                 "Invalid quantity" 
-               );
-   eosio_assert( quantity.symbol == IQ_SYMBOL, 
-                 "must vote with governance token"
-               );
+   eosio_assert( quantity.is_valid() && quantity.amount > 0, "Invalid quantity" );
+   eosio_assert( quantity.symbol == IQ_SYMBOL, "Must vote with governance token" );
+
    props propstable( _self, _self.value );
-   const auto& pt = propstable.get( symbl.raw(), 
-                                    "cdp type not proposed" 
+   const auto& pt = propstable.get( symbl.raw(), "CDP type not proposed" 
                                   );
    sub_balance( voter, quantity );
    accounts acnts( _self, symbl.raw() );  
@@ -374,26 +382,29 @@ ACTION daiqcontract::vote( name voter, symbol_code symbl,
       {  p.yay += quantity; });
 }
 
-ACTION daiqcontract::liquify( name bidder, name owner, 
-                              symbol_code symbl, asset bidamt ) 
-{  require_auth( bidder );
-   eosio_assert( symbl.is_valid(),
-                 "invalid cdp type symbol name" 
-               );
-   eosio_assert( bidamt.is_valid() && bidamt.amount > 0,
-                 "bid is invalid" 
-               );
+ACTION daiqcontract::liquify( name bidder, name owner, symbol_code symbl, asset bidamt ) 
+{  
+   // Make sure the bidder is authenticated
+   require_auth( bidder );
+
+   // Make sure the symbol and its value are valid
+   eosio_assert( symbl.is_valid(), "Invalid CDP type symbol name" );
+   eosio_assert( bidamt.is_valid() && bidamt.amount > 0, "Bid is invalid" );
+
+   // Get the stats for the stablecoin and validate
    stats stable( _self, _self.value );
-   const auto& st = stable.get( symbl.raw(), 
-                                "CDP type does not exist" 
-                              );
+   const auto& st = stable.get( symbl.raw(), "CDP type does not exist" );
+
+   // Fetch the CDP
    cdps cdpstable( _self, symbl.raw() );
+
+   // Make sure the price feed exists
    feeds feedstable( _self, _self.value );
-   const auto& it = cdpstable.get( owner.value, 
-                                   "this cdp doesn't exist" 
+
+   const auto& it = cdpstable.get( owner.value, "This CDP does not exist" 
                                  );
    if ( it.live ) {
-      eosio_assert ( it.stablecoin.amount > 0, "Can't liquify this cdp" );
+      eosio_assert ( it.stablecoin.amount > 0, "Can't liquify this CDP" );
       const auto& fc = feedstable.get( it.collateral.symbol.code().raw(), 
                                        "no price data" 
                                      );
@@ -438,7 +449,7 @@ ACTION daiqcontract::liquify( name bidder, name owner,
          contract = IQ_NAME;      
       sub_balance( bidder, bidamt );
       add_balance( bt -> bidder, bt -> bidamt, contract ); 
-      //subtract difference between bids cdp balance
+      //subtract difference between bids CDP balance
       cdpstable.modify( it, bidder, [&]( auto& p ) 
       {  p.stablecoin -= ( bidamt - bt -> bidamt ); }); 
       bidstable.modify( bt, bidder, [&]( auto& b ) { 
@@ -540,20 +551,19 @@ ACTION daiqcontract::propose( name proposer, symbol_code symbl,
                               uint64_t beg, uint64_t liq, 
                               uint32_t tau, uint32_t ttl,
                               name feeder, name contract ) 
-{  require_auth( proposer );
+{  
+   // Make sure the proposer is authenticated
+   require_auth( proposer );
    is_account( feeder );
-   eosio_assert( symbl.is_valid(), 
-                 "invalid cdp type symbol name" 
-               );
-   eosio_assert( clatrl.is_valid(),
-                 "invalid collateral symbol name" 
-               );
-   eosio_assert( stabl.is_valid(), 
-                 "invalid stablecoin symbol name" 
-               );
+
+   // Make sure the symbols and their values are valid
+   eosio_assert( symbl.is_valid(), "Invalid CDP type symbol name" );
+   eosio_assert( clatrl.is_valid(), "Invalid collateral symbol name" );
+   eosio_assert( stabl.is_valid(), "Invalid stablecoin symbol name" );
+
    props propstable( _self, _self.value );
    eosio_assert( propstable.find( symbl.raw() ) == propstable.end(), 
-                 "proposal for this cdp type already in session"
+                 "proposal for this CDP type already in session"
                );
    /* scope into owner because self scope may already have this symbol.
     * if symbol exists in self scope and this proposal is voted into live,
@@ -563,7 +573,7 @@ ACTION daiqcontract::propose( name proposer, symbol_code symbl,
    stats stable( _self, _self.value );   
    stats pstable( _self, proposer.value ); 
    eosio_assert( pstable.find( symbl.raw() ) == pstable.end(), 
-                 "proposer already claimed this cdp type"
+                 "proposer already claimed this CDP type"
                ); feeds feedstable(_self, _self.value);
    eosio_assert( feedstable.find( symbl.raw() ) == feedstable.end(), 
                  "Can't propose collateral or governance symbols"
@@ -623,12 +633,14 @@ ACTION daiqcontract::propose( name proposer, symbol_code symbl,
 }
 
 ACTION daiqcontract::referended( name proposer, symbol_code symbl ) 
-{  require_auth( _self );
+{  
+   // Make sure the contract is authenticated
+   require_auth( _self );
    eosio_assert( symbl.is_valid(), "Invalid symbol name" );
   
    props propstable( _self, _self.value );
-   const auto& prop = propstable.get( symbl.raw(), "no such proposal" );
-   eosio_assert( now() >= prop.deadline, "too soon to be referended" );
+   const auto& prop = propstable.get( symbl.raw(), "No such proposal" );
+   eosio_assert( now() >= prop.deadline, "Too soon to be referended" );
       
    if ( prop.yay == prop.nay ) { //vote tie, so revote
       transaction txn{};
@@ -697,12 +709,15 @@ ACTION daiqcontract::referended( name proposer, symbol_code symbl )
 
 ACTION daiqcontract::upfeed( name feeder, asset price, 
                              symbol_code cdp_type, symbol symbl ) 
-{  require_auth( feeder );
+{  
+   // Make sure the feeder is authenticated
+   require_auth( feeder );
+
+   // Make sure the symbol and its value are valid
    eosio_assert( price.is_valid(), "Invalid quantity" );
    eosio_assert( symbl.is_valid(), "Invalid symbol name" );
-   eosio_assert( price.amount > 0, 
-                 "Must use a positive quantity" 
-               );
+   eosio_assert( price.amount > 0, "Must use a positive quantity" );
+
    if ( !has_auth( _self ) ) {
       stats stable( _self, _self.value );
       const auto& st = stable.get( cdp_type.raw(), 
@@ -735,7 +750,9 @@ ACTION daiqcontract::upfeed( name feeder, asset price,
 
 ACTION daiqcontract::deposit( name from, name to,
                               asset quantity, string memo ) 
-{  require_auth( from );
+{  
+   // Make sure the depositor is authenticated
+   require_auth( from );
    name contract = get_code();
    eosio_assert( quantity.is_valid(), "Invalid quantity" );
    eosio_assert( quantity.amount > 0, "must transfer positive quantity" );
@@ -758,7 +775,9 @@ ACTION daiqcontract::deposit( name from, name to,
 
 ACTION daiqcontract::transfer( name from, name to,
                                asset quantity, string memo )
-{  require_auth( from );
+{  
+   // Make sure the depositor is authenticated
+   require_auth( from );
    eosio_assert( is_account( to ), "to account does not exist");
    eosio_assert( from != to, "cannot transfer to self" );
    eosio_assert( quantity.is_valid(), "Invalid quantity" );
@@ -770,7 +789,9 @@ ACTION daiqcontract::transfer( name from, name to,
 }
 
 ACTION daiqcontract::withdraw( name owner, asset quantity, string memo ) 
-{  require_auth( owner );
+{  
+   // Make sure the owner is authenticated
+   require_auth( owner );
    eosio_assert( quantity.is_valid(), "Invalid quantity" );
    eosio_assert( quantity.amount >= 0, "must transfer positive quantity" );
    eosio_assert( memo.size() <= 256, "memo has more than 256 bytes" );
@@ -793,7 +814,9 @@ ACTION daiqcontract::withdraw( name owner, asset quantity, string memo )
 }
 
 ACTION daiqcontract::close( name owner, symbol_code symbl ) 
-{  require_auth( owner );
+{  
+   // Make sure the owner is authenticated
+   require_auth( owner );
    accounts acnts( _self, symbl.raw() );
    auto it = acnts.get( owner.value,
                         "no balance object found"
